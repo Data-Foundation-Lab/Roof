@@ -1,0 +1,26 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Roof.Client\Roof.Client.csproj" />
+    <ProjectReference Include="..\Roof.Common\Roof.Common.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+	<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PublishAot>true</PublishAot>
+	<TrimMode>link</TrimMode>
+	<InvariantGlobalization>true</InvariantGlobalization>
+	<Configurations>Debug;Release;IA;Beta</Configurations>
+	<GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+	<Platforms>AnyCPU</Platforms>
+  </PropertyGroup>
+
+  <PropertyGroup Condition=" '$(Configuration)' == 'Beta' ">
+    <Optimize Condition=" '$(Optimize)' == '' ">true</Optimize>
+  </PropertyGroup>
+
+</Project>
