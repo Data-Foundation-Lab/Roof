@@ -16,7 +16,7 @@ The published implementation has hardware assumptions, unfinished functionality 
 
 The preview identifier describes the public source baseline. Existing assembly versions and IA/BETA channel version strings are internal component versions; they are not evidence of a stable public release. References to binary distribution in [DISTRIBUTION.md](DISTRIBUTION.md) describe procedures and obligations for any future binary conveyance, not downloads supplied with this preview.
 
-> **Host safety warning:** Do not run the existing Roof.Engine on production or general-purpose machines without appropriate isolation and a full understanding of its host-level operations. This includes DEBUG. Engine can install packages, edit SSH configuration, create Linux accounts, change passwords (including root), change filesystem permissions, configure networking, install a startup unit, replace its executable and reboot the machine. Use disposable hardware or a dedicated test VM with fresh state, isolated networking and no production credentials or mounts. Privileged Docker containers alone are not an adequate isolation boundary from their Docker host.
+> **Host safety warning:** With `ManageHost` enabled, do not run Roof.Engine on production or general-purpose machines without appropriate isolation and a full understanding of its host-level operations. This includes DEBUG. Engine can install packages, edit SSH configuration, create Linux accounts, change passwords (including the roof maintenance account), change filesystem permissions, configure networking, install a startup unit, replace its executable and reboot the machine. Use disposable hardware or a dedicated test VM with fresh state, isolated networking and no production credentials or mounts. Privileged Docker containers alone are not an adequate isolation boundary from their Docker host.
 
 ## Architecture
 
@@ -34,7 +34,7 @@ Enrollment occurs locally; Engine rejects registration through PathFinder. The r
 
 ![Roof architecture: Engine services and host integration](PROJECT_RUNNING_DOCUMENTS/CURRENT/%5BEXTERNAL-PUBLIC%5D%20Roof%20Architecture%20Diagram%20B.png)
 
-This view groups responsibilities and key interactions rather than listing every method call. Dashed arrows indicate library dependencies. Roof.Common is also referenced by Roof.Client, Roof.NativeAppSDK and Roof.PathFinder. Engine's resource service currently maintains logs; CPU, memory and other resource metrics are not implemented. Security and device checks remain stubs. The host operations shown here reflect the current appliance-oriented implementation; see the host safety warning above and the roadmap below for the planned separation of runtime services from privileged provisioning.
+This view groups responsibilities and key interactions rather than listing every method call. Dashed arrows indicate library dependencies. Roof.Common is also referenced by Roof.Client, Roof.NativeAppSDK and Roof.PathFinder. Engine's resource service currently maintains logs; CPU, memory and other resource metrics are not implemented. Security and device checks remain stubs. The host operations shown here apply to managed appliance installations. [Engine startup modes](#engine-startup)
 
 | Project | Existing responsibility | Direct project reference |
 | --- | --- | --- |
@@ -128,18 +128,20 @@ The existing device workflow transfers built files over SFTP and executes Engine
 
 These are compile configurations, not isolated environments or evidence of public release maturity. Project configuration names are `Debug`, `IA`, `Beta`, `Release`; the source uses symbols `DEBUG`, `IA`, `BETA`, `RELEASE` and the scripts use uppercase names.
 
-| Configuration | Meaning | Engine update channel | Existing Engine behavior |
+The host operations in this table apply when `ManageHost` is enabled. Automatic update checks run in IA, BETA and RELEASE for either value of `ManageHost`.
+
+| Configuration | Meaning | Engine update channel | Managed Engine behavior |
 | --- | --- | --- | --- |
 | DEBUG | Debugging | `ia` if updater is invoked manually | Skips automatic update checks, startup-unit installation and immediate offline AP startup. Still provisions SSH/storage, starts local and relay services, and periodically monitors the AP. Can log packet contents. |
 | IA | Internal Availability | `ia` | Startup update check when internet is detected; background checks after setup; startup-unit provisioning; immediate offline AP setup. |
 | BETA | Beta Testing | `beta` | Same startup/update branches as IA, using the beta channel. |
 | RELEASE | Release configuration | `pa` | Same startup/update branches as IA, using the public-availability channel. Not a stable-release guarantee. |
 
-All configurations share the same key directory, Linux users/group, SSH configuration, storage and service names. Changing the working directory only separates working-directory state; it does not create a separate installation. Builds can recognize existing clients or modify an existing installation's host state.
+In managed appliance mode all configurations share the same key directory, Linux users/group, SSH configuration, storage and service names. Changing the working directory only separates working-directory state; it does not create a separate installation. Builds can recognize existing clients or modify an existing installation's host state.
 
 Once service startup is reached, every configuration starts the PathFinder connection/retry loop and announces the Roof identifier when connected. Historically configured hosted services are shared dependencies, not a dedicated development sandbox. The published source replaces their addresses with `PATHFINDER_PUBLIC_URL` in [PathFinderService.cs](Src/Roof.Engine/Services/PathFinderService.cs) and `RELEASE_CHANNEL_BASE_URL` in [ReleaseServerIngressManager.cs](Src/Roof.Engine/Managers/ReleaseServerIngressManager.cs). These are non-URL source placeholders, not environment-variable substitutions. Remote connectivity and update requests fail until suitable addresses are supplied and the code rebuilt. Host provisioning can still execute with those placeholders unchanged.
 
-Engine separately pings `8.8.8.8` to infer internet availability. Blocking ICMP can therefore affect update/AP decisions even if HTTP connectivity works. Endpoint externalization, an RT development relay, separate development credential storage/authentication and safer DEBUG defaults remain follow-up work.
+For startup update checks or managed AP decisions, Engine pings `8.8.8.8` to infer internet availability. Blocking ICMP can therefore affect update/AP decisions even if HTTP connectivity works. Endpoint externalization, an RT development relay, separate development credential storage/authentication and safer DEBUG defaults remain follow-up work.
 
 ## PathFinder and Release Infrastructure
 
@@ -168,17 +170,31 @@ The repository contains the Engine's release-service consumer, **not the release
 
 The consumer expects:
 
-- `<base>/<channel>/artifact_versions.json`, with an `artifacts` array containing a `RoofEngine` entry and `Version` / `LINUX_ARM64_Hash` fields.
-- `<base>/<channel>/roofengine/<version>/LINUX_ARM64/Roof.Engine`, where channel is `ia`, `beta` or `pa`.
-- A Linux ARM64 artifact even though the runtime download selection tests Linux rather than validating the CPU architecture.
+- `<base>/<channel>/artifact_versions.json`, with an `artifacts` array containing a `RoofEngine` entry and `Version` and `LINUX_ARM64_Hash`.
+- `<base>/<channel>/roofengine/<version>/<artifact>/Roof.Engine`, where channel is `ia`, `beta` or `pa`.
+- A `LINUX_ARM64` artifact. The current updater hardcodes ARM64 for every Linux process, including x64.
 
 The updater downloads an executable, checks SHA-256 against metadata from that same service, replaces the installed binary and restarts it. This is not independent signed-update verification. Protect the service, metadata, upload path, DNS/TLS and all credentials with authority to publish updates: they can influence code subsequently run with Engine privileges. No private service credentials, access to DFLab infrastructure, or executable artifacts are supplied by this source preview.
 
 ## Engine Host, Filesystem and Access requirements
 
+### Minimum baseline hardware-independent runtime
+
+Engine encrypts the entire `roof_config/config.json` using the existing AES configuration key. The encrypted payload includes `ManageHost`, the installation identity and client records. Fresh installations default to `ManageHost=false`. Run from a dedicated writable working directory: `keys/` holds the private keys (directory 0700, files 0600), `playground/` holds native storage, and `Logs/` holds logs.
+
+ConfigurationManager locates the encryption key before reading `ManageHost`, then decrypts and validates configuration before host checks or provisioning. For an existing configuration, it looks for `keys/roof_config.key` under the working directory first, falling back to `/etc/Roof/keys/roof_config.key` when the local key is absent. Missing keys, invalid ciphertext or failed integrity validation block startup. There is no separate runtime configuration file or managed-initialisation command.
+
+With `ManageHost=false`, startup skips OpenSSH/SFTP provisioning, group and ACL changes, legacy playground migration, systemd registration and Wi-Fi/AP setup. Periodic AP checks are skipped while stale-client cleanup continues. Client commands for account provisioning, password changes, Wi-Fi management and host restart return a host-management-disabled response. Native storage runs under the Engine process's Linux account; an authenticated Roof client does not need its own Linux account or `OSSystemUsername`.
+
+Managed startup requires an encrypted configuration with `ManageHost=true` and its matching appliance key in `/etc/Roof/keys/`. It retains the configuration's installation identity and client records and uses `/srv/roof/playground`. A missing `ManageHost` property defaults to false; appliance mode is not inferred from hardware.
+
+The local protocol remains on TCP `8671` and UDP `6969`. Engine runs in the foreground, but its startup-completed log does not guarantee that either asynchronous listener has finished binding. Actual listener responses are the acceptance check for offline ordinary-user startup and managed Pi startup.
+
+Automatic updates remain enabled in IA, BETA and RELEASE independently of `ManageHost`, including the startup internet probe and background checks after initial setup. Two limitations remain: the updater selects ARM64 artifacts on x64 and uses `sudo -n` to relaunch even with `ManageHost=false`. Architecture-aware artifact selection and unprivileged relaunch are still required for ongoing generic x64 operation. The existing x64 build-wrapper limitation is documented in [BUILDING.md](BUILDING.md).
+
 ### Operating System and Hardware
 
-Engine assumes a Pi 5-style Linux ARM64 environment with a writable persistent filesystem, systemd, Bash, root access and working noninteractive `sudo` calls. Some operations use direct privileged file I/O rather than sudo, so running as an ordinary account with a few sudo permissions is not an established supported setup. Debian/APT tooling and account utilities (`getent`, `adduser`, `groupadd`, `usermod`, `chpasswd`) are used directly. Storage must support Unix ownership, permissions, setgid directories and POSIX default ACLs (`setfacl`); a filesystem without those semantics is unsuitable for the existing model.
+With `ManageHost` enabled, Engine assumes a Pi 5-style Linux ARM64 environment with a writable persistent filesystem, systemd, Bash, root access and working noninteractive `sudo` calls. Some operations use direct privileged file I/O rather than sudo, so running as an ordinary account with a few sudo permissions is not an established supported setup. Debian/APT tooling and account utilities (`getent`, `adduser`, `groupadd`, `usermod`, `chpasswd`) are used directly. Storage must support Unix ownership, permissions, setgid directories and POSIX default ACLs (`setfacl`); a filesystem without those semantics is unsuitable for the existing model.
 
 NetworkManager, D-Bus and `nmcli`, `ip`, `iw`, `rfkill` and Wi-Fi scanning tools are required for the Wi-Fi paths. The code assumes a wireless interface named `wlan0` and a driver capable of creating an AP interface `ap0`. The profile is named `RoofAP`, advertises **Roof Setup**, uses the 2.4 GHz `bg` band and IPv4 shared mode, and has no Wi-Fi password. AP monitoring runs approximately every fifteen seconds. Recovery can unblock Wi-Fi, change radio/interface state, recreate AP configuration and restart NetworkManager. This can disrupt the host's existing connectivity.
 
@@ -186,11 +202,11 @@ A container without physical Wi-Fi/driver access cannot validate these operation
 
 ### Linux Accounts, Shared Storage and SFTP
 
-Client setup creates Linux accounts and adds them to `roofsftpusers`. Client IDs may be used as Linux usernames. Password-management commands use `chpasswd`, including a command that changes root's password. These are real host accounts and credentials.
+With `ManageHost=true`, client account provisioning creates Linux accounts and adds them to `roofsftpusers`. Client IDs may be used as Linux usernames. Password-management commands use `chpasswd`, including password rotation for the maintenance account `roof`. These are real host accounts and credentials.
 
-Engine ensures `/srv/roof/playground` exists, sets `/srv/roof` to root ownership and mode `0755`, applies group `roofsftpusers` recursively to the playground, grants group read/write/traversal, removes access for others, sets directory setgid bits and default ACLs for group inheritance. Created directories use `2770`; created files can use `0770`. Startup can migrate legacy `/home/<username>/playground` content into the shared location. Back up any test state that matters before exercising migrations.
+With `ManageHost=true`, Engine ensures `/srv/roof/playground` exists, sets `/srv/roof` to root ownership and mode `0755`, applies group `roofsftpusers` recursively to the playground, grants group read/write/traversal, removes access for others, sets directory setgid bits and default ACLs for group inheritance. Created directories use `2770`; created files can use `0770`. Startup can migrate legacy `/home/<username>/playground` content into the shared location. Back up any test state that matters before exercising migrations.
 
-Engine installs/checks OpenSSH and ACL tooling through APT, edits `/etc/ssh/sshd_config` and restarts SSH before accepting client requests. It expects `/usr/lib/openssh/sftp-server` and configures a `Match Group roofsftpusers` block with:
+With `ManageHost=true`, Engine installs/checks OpenSSH and ACL tooling through APT, edits `/etc/ssh/sshd_config` and restarts SSH before accepting client requests. It expects `/usr/lib/openssh/sftp-server` and configures a `Match Group roofsftpusers` block with:
 
 ```text
 ChrootDirectory /srv/roof
@@ -205,10 +221,13 @@ The chroot and its parents must satisfy OpenSSH ownership/access requirements, i
 
 | Location | Existing contents / access requirement |
 | --- | --- |
-| `/etc/Roof/keys/roof_config.key` | Configuration AES key and IV. Writer sets root ownership and mode `0600`. |
+| `<working-directory>/keys/` | Fresh unprivileged installation: configuration and client keys owned by the Engine user; directory `0700`, files `0600`. |
+| `<working-directory>/playground/` | Unprivileged shared native storage, created under the Engine process identity. |
+| `<working-directory>/Logs/` | Existing working-directory log location in both modes. |
+| `/etc/Roof/keys/roof_config.key` | Appliance configuration AES key and IV. Writer sets root ownership and mode `0600`. |
 | `/etc/Roof/keys/<clientID>.key` | Per-client network key and IV, also root-owned `0600`. |
-| `/etc/Roof/keys/` | Shared absolute key namespace in every build; writer enforces root ownership and `0700`. Protect `/etc/Roof` and ancestor paths as well. |
-| `<working-directory>/roof_config/config.json` | Encrypted configuration bytes despite the `.json` name: installation ID, setup state and registered clients. Protect the directory from replacement or unauthorized writes. |
+| `/etc/Roof/keys/` | Managed installation key namespace across builds; writer enforces root ownership and `0700`. Protect `/etc/Roof` and ancestor paths as well. |
+| `<working-directory>/roof_config/config.json` | Whole-file encrypted configuration, including `ManageHost`, installation ID, setup state and registered clients. Protect the directory from replacement or unauthorized writes. |
 | `/srv/roof/playground` | Shared client data, group permissions and default ACLs as described above. |
 | `/etc/ssh/sshd_config` | Privileged SSH/SFTP configuration modified by Engine. |
 | `/etc/systemd/system/roofenginestartup.service` | Non-DEBUG startup unit, installed root-owned `0644`, referencing the current executable and working directory. |
@@ -219,7 +238,7 @@ Each key file stores **48 raw bytes: a 32-byte AES-256 key followed by a 16-byte
 
 Network encryption uses the existing AES helpers and stored IVs; it is not a reviewed authenticated key-exchange system. Local enrollment sends the new client's key/IV over the initial TCP exchange before encryption is established and can enroll additional clients after initial setup. Remote enrollment through the relay is rejected. Only allow enrollment on a trusted isolated network. Roof.Client holds caller-supplied key material in process memory; persistent client credential storage belongs to its consuming application.
 
-Keep real keys, configuration, passwords, user files and logs out of source control and development images. DEBUG can log packet data. Protect the binary and all directories from which privileged startup/update code is loaded; changing only the working directory does not isolate the host-wide keys, accounts or services.
+Keep real keys, configuration, passwords, user files and logs out of source control and development images. DEBUG can log packet data. Protect the binary and all directories from which privileged startup/update code is loaded; for managed installations, changing only the working directory does not isolate the host-wide keys, accounts or services.
 
 ## VMTesting
 

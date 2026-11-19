@@ -128,7 +128,8 @@ namespace Roof.Engine.Services
                     try
                     {
                         ClientManager.RemoveStaleClients();
-                        await SetupAPManager.UpdateSetupAPRequirement();
+                        if (ConfigurationManager.GetConfiguration().ManageHost)
+                            await SetupAPManager.UpdateSetupAPRequirement();
                     }
                     catch (Exception ex)
                     {

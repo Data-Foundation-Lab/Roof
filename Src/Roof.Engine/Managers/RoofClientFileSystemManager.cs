@@ -29,7 +29,8 @@ namespace Roof.Engine.Managers
         private static readonly Dictionary<string, RoofFileData?> _loadedTopLevelFiles = new Dictionary<string, RoofFileData?>();
         private static readonly Dictionary<string, RoofFileData?> _loadedSubFiles = new Dictionary<string, RoofFileData?>();
 
-        public const string PlaygroundPath = "/srv/roof/playground";
+        public static string PlaygroundPath => ConfigurationManager.GetConfiguration().ManageHost ? "/srv/roof/playground"
+            : SafePath.CanonicalizeUnder(Path.Combine(Directory.GetCurrentDirectory(), "playground"), Directory.GetCurrentDirectory());
 
         private const string SftpGroupSetupCommand =
             "getent group roofsftpusers >/dev/null; status=$?; " +
@@ -53,11 +54,10 @@ namespace Roof.Engine.Managers
 
         public ClientFileSystemManager(string clientUsername)
         {
-            if (!SecurityManager.IsValidUsername(clientUsername))
+            if (ConfigurationManager.GetConfiguration().ManageHost && !SecurityManager.IsValidUsername(clientUsername))
                 throw new ArgumentException("Invalid Linux username.");
 
             _basePath = PlaygroundPath;
-
             _currentWorkingDirectory = _basePath;
 
             try
@@ -69,6 +69,19 @@ namespace Roof.Engine.Managers
                 Logger.LogExceptionToFile($"[RoofClientFileSystemManager]: Failed to access directory info for client's base directory.", ex);
                 throw;
             }
+        }
+
+        private static async Task<bool> ApplyAppliancePermissions(string path, string mode)
+        {
+            if (!ConfigurationManager.GetConfiguration().ManageHost)
+                return true;
+
+            var quotedPath = SafePath.ShellQuote(path);
+            var result = await Shell.ExecuteAsync(
+                $"sudo chown root:roofsftpusers -- {quotedPath} && sudo chmod {mode} -- {quotedPath}").ConfigureAwait(false);
+            if (result.Length > 0)
+                Logger.LogToFile(result, LogSeverity.Warning);
+            return result.Length == 0;
         }
 
         public static async Task EnsureSharedPlayground()
@@ -525,12 +538,7 @@ namespace Roof.Engine.Managers
                 
                 if (Directory.CreateDirectory(safePath) != null)
                 {
-                    var quotedPath = SafePath.ShellQuote(safePath);
-                    
-                    string chownUserDirOwnRoot = await Shell.ExecuteAsync($"sudo chown root:roofsftpusers -- {quotedPath}").ConfigureAwait(false);
-                    string chownUserDirRWX = await Shell.ExecuteAsync($"sudo chmod 2770 -- {quotedPath}").ConfigureAwait(false);
-
-                    if (chownUserDirOwnRoot == "" && chownUserDirRWX == "")
+                    if (await ApplyAppliancePermissions(safePath, "2770").ConfigureAwait(false))
                     {
                         var parentDir = GetDirectoryCore(dirData.ParentDirectory);
 
@@ -572,8 +580,6 @@ namespace Roof.Engine.Managers
                     else
                     {
                         Logger.LogToFile($"[RoofClientFileSystemManager] - CreateDirectory(): Failed to set directory ownership and permissions.", LogSeverity.Warning);
-                        Logger.LogToFile(chownUserDirOwnRoot, LogSeverity.Warning);
-                        Logger.LogToFile(chownUserDirRWX, LogSeverity.Warning);
 
                         return false;
                     }
@@ -1025,14 +1031,9 @@ namespace Roof.Engine.Managers
                 if (System.IO.File.Exists(safePath))
                     return false;
 
-                var quotedPath = SafePath.ShellQuote(safePath);
-                
                 using(var fileStream = new FileStream(safePath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 {
-                    string chownUserFileOwnRoot = await Shell.ExecuteAsync($"sudo chown root:roofsftpusers -- {quotedPath}").ConfigureAwait(false);
-                    string chownUserFileRWX = await Shell.ExecuteAsync($"sudo chmod 770 -- {quotedPath}").ConfigureAwait(false);
-
-                    if (chownUserFileOwnRoot == "" && chownUserFileRWX == "")
+                    if (await ApplyAppliancePermissions(safePath, "770").ConfigureAwait(false))
                     {
                         var parentDir = GetDirectoryCore(fileData.ParentDirectory);
 
@@ -1072,8 +1073,6 @@ namespace Roof.Engine.Managers
                     else
                     {
                         Logger.LogToFile($"[RoofClientFileSystemManager] - CreateFile(): Failed to set file ownership and permissions.", LogSeverity.Warning);
-                        Logger.LogToFile(chownUserFileOwnRoot, LogSeverity.Warning);
-                        Logger.LogToFile(chownUserFileRWX, LogSeverity.Warning);
 
                         return false;
                     }

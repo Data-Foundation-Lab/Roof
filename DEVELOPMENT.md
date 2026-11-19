@@ -334,14 +334,18 @@ Security fixes may be developed through a restricted process where public disclo
 
 ### 8.1 Build Configurations and Hosted Services
 
+Host provisioning in this table requires `ManageHost=true`. Automatic update checks run in IA, BETA and RELEASE for either value of `ManageHost`.
+
 | Engine configuration | Update channel used by the code | Startup behaviour |
 | --- | --- | --- |
-| DEBUG | `ia` if the updater is invoked | Automatic update checks and startup-unit installation are skipped. Local services and periodic setup AP monitoring still start. DEBUG can log packet contents. |
+| DEBUG | `ia` if the updater is invoked | Automatic update checks and startup-unit installation are skipped. Local services start; periodic setup AP monitoring requires `ManageHost=true`. DEBUG can log packet contents. |
 | IA | `ia` | Automatic update checks, startup-unit provisioning and offline setup AP startup are enabled. |
 | BETA | `beta` | Same startup behaviour as IA. |
 | RELEASE | `pa` | Same startup behaviour as IA. |
 
-All four configurations start the PathFinder client once Engine initialisation reaches service startup. With the original WSS address configured, it automatically connects or retries against the shared hosted relay and announces the Roof identifier. The public source uses a non-URL placeholder for both the relay address and the release server base address. Relay connection attempts and release metadata requests therefore fail until valid addresses are supplied in source. Local networking and host provisioning can still run. The Engine also probes internet reachability with ICMP to `8.8.8.8`, independently of the two placeholders.
+All four configurations start the PathFinder client once Engine initialisation reaches service startup. With the original WSS address configured, it automatically connects or retries against the shared hosted relay and announces the Roof identifier. The public source uses a non-URL placeholder for both the relay address and the release server base address. Relay connection attempts and release metadata requests therefore fail until valid addresses are supplied in source. Local networking and host provisioning can still run. For startup update checks or managed AP decisions, Engine probes internet reachability with ICMP to `8.8.8.8`, independently of the two placeholders.
+
+The current updater hardcodes `LINUX_ARM64` downloads and hashes on all Linux architectures and relaunches through `sudo -n` in IA, BETA and RELEASE. These remain limitations for generic x64 and unprivileged operation; `ManageHost=false` does not disable updates.
 
 The updater reads channel metadata and can replace and restart the Engine executable. It checks the downloaded binary against a SHA-256 hash supplied by the same release service. The release server, its metadata and its upload credentials are therefore part of the trust boundary for deployments with updates enabled.
 
@@ -349,14 +353,20 @@ The standalone PathFinder listens for plain WebSocket connections on all IPv4 in
 
 ### 8.2 State and Authentication Across Builds
 
-- All four builds use `roof_config/config.json` under the working directory and the same absolute `/etc/Roof/keys/` directory. A different working directory separates the JSON file but still shares the configuration key and the per-client key namespace. The Linux account, SFTP group, shared-storage and service namespaces are also host-wide.
-- The Engine generates its configuration key and generates per-client AES-256 keys and IVs during registration. Key files contain raw key and IV bytes. The writer sets root ownership, mode `0700` on the key directory and mode `0600` on files. Keep keys, configuration, logs and storage from real installations out of development environments and release materials.
+`ManageHost` is part of the whole-file encrypted configuration and defaults to false. ConfigurationManager resolves the key before decrypting the setting and completes configuration loading before host checks. Existing configuration uses the working-directory key when present, otherwise the appliance key under `/etc/Roof/keys/`. Decryption or integrity failure blocks startup.
+
+With `ManageHost=false`, startup skips SSH/SFTP, group/ACL provisioning, legacy playground migration, systemd registration and AP setup. The periodic client timer still removes stale clients but skips AP checks. Host-management client commands are rejected. Native filesystem access uses the Engine process identity and does not require a Linux username for each Roof client. With `ManageHost=true`, the filesystem manager retains client Linux-username validation and uses the appliance playground.
+
+TCP `8671` and UDP `6969` retain their existing protocol. Service startup launches asynchronous listener work; the startup-completed log is not proof that either bind succeeded. Verify the actual listeners when assessing runtime readiness.
+
+- All four builds use `roof_config/config.json` under the working directory. Unprivileged startup keeps keys and playground data in sibling directories. Managed installations share `/etc/Roof/keys/` across working directories. In managed mode, the Linux account, SFTP group, shared-storage and service namespaces are also host-wide.
+- The Engine generates its configuration key and generates per-client AES-256 keys and IVs during registration. Key files contain raw key and IV bytes. The key directory uses mode `0700` and key files use `0600`. The running user owns newly created keys in unprivileged mode, and root owns managed keys. Keep keys, configuration, logs and storage from real installations out of development environments and release materials.
 - Compile flags select release channels and runtime branches. Authentication uses the installation identity, registration records and client key material across configurations. A build that opens an existing installation's state can recognise its clients and overwrite shared state. Client applications using Roof.Client supply the key and IV to the library, which keeps them in process memory. The caller is responsible for any persistent client credential storage.
 - Local enrollment depends on network isolation. The enrollment exchange gives an unregistered local client its key and IV over TCP, and the exchange can also enroll additional clients after initial setup. The relay path rejects enrollment.
 
 ### 8.3 Privileged Development and Test Execution
 
-Run Engine on disposable Linux ARM64 hardware or in a dedicated test VM with fresh state and an isolated network. This applies to DEBUG and to runs with the public endpoint placeholders. The Engine assumes a Raspberry Pi 5-style Linux environment with systemd, sufficient root or sudo privileges, writable configuration and storage locations, and a trusted executable and working directory.
+For `ManageHost=true`, run Engine on disposable Linux ARM64 hardware or in a dedicated test VM with fresh state and an isolated network. This applies to DEBUG and to runs with the public endpoint placeholders. The Engine assumes a Raspberry Pi 5-style Linux environment with systemd, sufficient root or sudo privileges, writable configuration and storage locations, and a trusted executable and working directory.
 
 - Startup can install OpenSSH and ACL tooling through APT, edit `/etc/ssh/sshd_config`, restart SSH, create SFTP groups and shared storage under `/srv/roof/playground`, and migrate existing client storage. IA, BETA and RELEASE can install and enable `/etc/systemd/system/roofenginestartup.service` using the current executable and working directory. Keep the executable and its parent directories protected from unprivileged writes. The unit installer assumes a trusted temporary-file location and a binary path safe to embed in a shell command.
 - Client operations can create Linux accounts, change passwords, change ownership and permissions, modify Wi-Fi profiles and reboot the machine. Setup AP monitoring can create or remove `ap0`, modify the `RoofAP` NetworkManager profile and restart NetworkManager. It depends on `wlan0`, compatible hardware and the `nmcli`, `ip`, `iw` and `rfkill` tools. The setup AP is open. Keep it and the Engine's local TCP 8671 and UDP 6969 traffic away from untrusted clients and production networks.

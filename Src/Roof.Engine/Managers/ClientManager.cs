@@ -328,7 +328,7 @@ namespace Roof.Engine.Managers
                     client.WithStateLock(c =>
                     {
                         var username = config.RegisteredClients[packet.ClientID].OSSystemUsername;
-                        if (!string.IsNullOrEmpty(username))
+                        if (!ConfigurationManager.GetConfiguration().ManageHost || !string.IsNullOrEmpty(username))
                             c.FSManager = new ClientFileSystemManager(username);
 
                         c.ClientID = packet.ClientID;
@@ -370,6 +370,17 @@ namespace Roof.Engine.Managers
                 {
                     Logger.LogToFile($"[ClientManager] - HandleClientCommandPacket(): Command [{prefix}] expects {expectedParams} params but got {packet.Requests.Count - 1}.", LogSeverity.Warning);
                     break;
+                }
+
+                if (!ConfigurationManager.GetConfiguration().ManageHost && prefix is ("CREATE_ROOF_USER" or "ROTATE_ROOTPASSWORD"
+                    or "ROTATE_CLIENTPASSWORD" or "GET_WIFI_LIST" or "CONNECT_TO_WIFI" or "GET_CURRENT_WIFI"
+                    or "FORGET_CURRENT_WIFI" or "RESTART_ROOF"))
+                {
+                    var response = new RoofNetworkNativeResponsePacket { Status = false };
+                    response.AddResponse($"{prefix}_COMMAND_RESULT");
+                    response.AddResponse("Host management is disabled.");
+                    await SendMessageToClient(client, response);
+                    return;
                 }
 
                 var args = packet.Requests.Skip(1).ToList();  // last arg may include spaces

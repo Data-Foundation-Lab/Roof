@@ -35,6 +35,7 @@ namespace Roof.Engine.Managers
         ///////////RAW///////////
 
         ///////////ENCRYPTED///////////
+        public bool ManageHost { get; set; }
         public int SchemaVersion { get; set; }
         public string RoofIdentifier { get; set; }
         public bool HasCompletedInitialSetup { get; set; }
@@ -44,11 +45,14 @@ namespace Roof.Engine.Managers
 
     public class ConfigurationManager
     {
-        internal const int CURRENT_CONFIG_FILE_SCHEMA_VERSION = 2;
+        internal const int CURRENT_CONFIG_FILE_SCHEMA_VERSION = 3;
 
-        private static string _configurationEncryptionKeyRoot = "/etc/Roof";
-        internal static string _configurationEncryptionKeyDirectory = $"/etc/Roof/keys/";
-        private static string _configurationEncryptionKeyFilePath =  _configurationEncryptionKeyDirectory + "roof_config.key";
+        private const UnixFileMode PRIVATE_FILE_FILE_MODE = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        private const UnixFileMode PRIVATE_DIRECTORY_FILE_MODE = PRIVATE_FILE_FILE_MODE | UnixFileMode.UserExecute;
+        private static string KEY_ROOT = Directory.GetCurrentDirectory();
+        private static string KeyDirectory => SafePath.CanonicalizeUnder(Path.Combine(KEY_ROOT, "keys"), KEY_ROOT);
+        private static string _configurationEncryptionKeyFilePath =>
+            SafePath.CanonicalizeUnder(Path.Combine(KeyDirectory, "roof_config.key"), KeyDirectory);
         private static string _configurationFileDirectory = $"{Directory.GetCurrentDirectory()}/roof_config/";
         private static string _configurationFilePath = _configurationFileDirectory + "config.json";
 
@@ -57,10 +61,11 @@ namespace Roof.Engine.Managers
             if (!SecurityManager.IsValidClientID(clientID))
                 throw new ArgumentException("Invalid client ID.");
 
-            return SafePath.CanonicalizeUnder(_configurationEncryptionKeyDirectory + $"{clientID}.key", _configurationEncryptionKeyDirectory);
+            return SafePath.CanonicalizeUnder(Path.Combine(KeyDirectory, $"{clientID}.key"), KeyDirectory);
         }
 
-        private static RoofConfiguration? _loadedConfiguration;
+        private static RoofConfiguration _configuration = new();
+        private static bool _installationLoaded;
 
         private static async Task WriteEncryptionKey(string path, string nek, string niv, bool overwrite)
         {
@@ -69,13 +74,18 @@ namespace Roof.Engine.Managers
             if (keyBytes.Length != 32 || ivBytes.Length != 16)
                 throw new ArgumentException("Encryption keys require a 32-byte key and a 16-byte IV.");
 
-            var safeKeyDir = SafePath.CanonicalizeUnder(_configurationEncryptionKeyDirectory, _configurationEncryptionKeyRoot);
+            var safeKeyDir = KeyDirectory;
             var safeKeyFile = SafePath.CanonicalizeUnder(path, safeKeyDir);
-            Directory.CreateDirectory(safeKeyDir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-            string directoryResult = await Shell.ExecuteAsync(
-                $"sudo chown root:root -- {SafePath.ShellQuote(safeKeyDir)} && sudo chmod 700 -- {SafePath.ShellQuote(safeKeyDir)}");
-            if (!string.IsNullOrEmpty(directoryResult))
-                throw new IOException("Failed to secure encryption key directory: " + directoryResult);
+            Directory.CreateDirectory(safeKeyDir, PRIVATE_DIRECTORY_FILE_MODE);
+            if (_configuration.ManageHost)
+            {
+                string result = await Shell.ExecuteAsync(
+                    $"sudo chown root:root -- {SafePath.ShellQuote(safeKeyDir)} && sudo chmod 700 -- {SafePath.ShellQuote(safeKeyDir)}");
+                if (!string.IsNullOrEmpty(result))
+                    throw new IOException("Failed to secure encryption key directory: " + result);
+            }
+            else
+                File.SetUnixFileMode(safeKeyDir, PRIVATE_DIRECTORY_FILE_MODE);
 
             // Write privately, then replace atomically so failed rotation leaves the old key intact.
             string temporaryPath = safeKeyFile + "." + Guid.NewGuid().ToString("N") + ".tmp";
@@ -86,16 +96,19 @@ namespace Roof.Engine.Managers
                     Mode = FileMode.CreateNew,
                     Access = FileAccess.Write,
                     Share = FileShare.None,
-                    UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite
+                    UnixCreateMode = PRIVATE_FILE_FILE_MODE
                 }))
                 {
                     await stream.WriteAsync(keyBytes.Concat(ivBytes).ToArray());
                 }
 
-                string permissionResult = await Shell.ExecuteAsync(
-                    $"sudo chown root:root -- {SafePath.ShellQuote(temporaryPath)} && sudo chmod 600 -- {SafePath.ShellQuote(temporaryPath)}");
-                if (!string.IsNullOrEmpty(permissionResult))
-                    throw new IOException("Failed to secure encryption key file: " + permissionResult);
+                if (_configuration.ManageHost)
+                {
+                    string result = await Shell.ExecuteAsync(
+                        $"sudo chown root:root -- {SafePath.ShellQuote(temporaryPath)} && sudo chmod 600 -- {SafePath.ShellQuote(temporaryPath)}");
+                    if (!string.IsNullOrEmpty(result))
+                        throw new IOException("Failed to secure encryption key file: " + result);
+                }
 
                 SafePath.CanonicalizeUnder(safeKeyFile, safeKeyDir);
                 File.Move(temporaryPath, safeKeyFile, overwrite);
@@ -156,51 +169,23 @@ namespace Roof.Engine.Managers
         {
             try
             {
-                if (!Directory.Exists(_configurationFileDirectory))
+                Directory.CreateDirectory(_configurationFileDirectory);
+                bool existing = File.Exists(_configurationFilePath);
+                KEY_ROOT = Directory.GetCurrentDirectory();
+                // For an existing installation locate its key before decrypting ManageHost.
+
+                if (existing)
                 {
-                    Logger.LogToFile("[ConfigurationManager]: Creating configuration directory...");
-                    Directory.CreateDirectory(_configurationFileDirectory);
+                    if (!File.Exists(_configurationEncryptionKeyFilePath))
+                        KEY_ROOT = "/etc/Roof";
+                    var contents = await File.ReadAllBytesAsync(_configurationFilePath);
+                    return await LoadConfiguration(contents) != null;
                 }
 
-                if (!File.Exists(_configurationEncryptionKeyFilePath))
-                {
-                    if (File.Exists(_configurationFilePath))
-                    {
-                        Logger.LogToFile("[ConfigurationManager]: Existing configuration is missing its encryption key.", LogSeverity.Danger);
-                        return false;
-                    }
+                if (!File.Exists(_configurationEncryptionKeyFilePath) && !await CreateConfigEncryptionKey())
+                    return false;
 
-                    Logger.LogToFile("[ConfigurationManager]: Creating configuration encryption key...");
-                    bool cfgEncKeyCreateStatus = await CreateConfigEncryptionKey();
-
-                    if (!cfgEncKeyCreateStatus)
-                    {
-                        Logger.LogToFile("[ConfigurationManager]: Failed to create configuration encryption key.", LogSeverity.Danger);
-                        return false;
-                    }
-                }
-
-                if (!File.Exists(_configurationFilePath))
-                {
-                    Logger.LogToFile("[ConfigurationManager]: Creating default configuration file...");
-                    return await CreateDefaultConfigurationFile();
-                }
-                else
-                {
-                    Logger.LogToFile("[ConfigurationManager]: Loading configuration file...");
-                    var loadConfResult = await LoadConfiguration();
-
-                    if (loadConfResult != null)
-                    {
-                        Logger.LogToFile("[ConfigurationManager]: Loaded configuration file successfully.");
-                        return true;
-                    }
-                    else
-                    {
-                        Logger.LogToFile("[ConfigurationManager]: Failed to load configuration file.", LogSeverity.Danger);
-                        return false;
-                    }
-                }
+                return await CreateDefaultConfigurationFile();
             }
             catch(Exception ex)
             {
@@ -211,19 +196,10 @@ namespace Roof.Engine.Managers
 
         internal static Task<bool> SaveLoadedConfiguration()
         {
-            return _loadedConfiguration == null ? Task.FromResult(true) : SaveConfiguration(_loadedConfiguration);
+            return _installationLoaded ? SaveConfiguration(_configuration) : Task.FromResult(true);
         }
 
-        public static RoofConfiguration GetConfiguration()
-        {
-            if (_loadedConfiguration == null)
-            {
-                Logger.LogToFile("[ConfigurationManager] - GetConfiguration(): Manager is not initialized properly.", LogSeverity.Danger);
-                return new RoofConfiguration();
-            }
-
-            return _loadedConfiguration;
-        }
+        public static RoofConfiguration GetConfiguration() => _configuration;
 
         public static async Task<bool> SaveConfiguration(RoofConfiguration? configuration)
         {
@@ -277,7 +253,8 @@ namespace Roof.Engine.Managers
                     if (File.Exists(temporaryPath))
                         File.Delete(temporaryPath);
                 }
-                _loadedConfiguration = configuration;
+                _configuration = configuration;
+                _installationLoaded = true;
                 return true;
             }
             catch (Exception ex)
@@ -287,12 +264,10 @@ namespace Roof.Engine.Managers
             }
         }
 
-        private static async Task<RoofConfiguration?> LoadConfiguration()
+        private static async Task<RoofConfiguration?> LoadConfiguration(byte[] readEncryptedConfigFileContent)
         {
             try
             {
-                var readEncryptedConfigFileContent = await File.ReadAllBytesAsync(_configurationFilePath);
-
                 if (!File.Exists(_configurationEncryptionKeyFilePath))
                 {
                     Logger.LogToFile("[ConfigurationManager] - LoadConfiguration(): Failed to find config encryption key.", LogSeverity.Danger);
@@ -346,11 +321,13 @@ namespace Roof.Engine.Managers
                     return null;
                 }
                 
+                if (deserialisedConfig.ManageHost && KEY_ROOT != "/etc/Roof")
+                    throw new InvalidDataException("Managed installations require the appliance key store.");
+
                 if (deserialisedConfig.SchemaVersion < CURRENT_CONFIG_FILE_SCHEMA_VERSION)
                 {
-                    Logger.LogToFile($"[ConfigurationManager] - LoadConfiguration(): Migrating/re-encrypting configuration to version: {CURRENT_CONFIG_FILE_SCHEMA_VERSION}");
-                    
-                    deserialisedConfig = await Migrate(configFileContent, deserialisedConfig);
+                    if (deserialisedConfig.SchemaVersion < 2)
+                        deserialisedConfig = await Migrate(configFileContent, deserialisedConfig);
                     deserialisedConfig.SchemaVersion = CURRENT_CONFIG_FILE_SCHEMA_VERSION;
 
                     // After migration, persist upgraded file
@@ -358,8 +335,9 @@ namespace Roof.Engine.Managers
                         return null;
                 }
                 
-                _loadedConfiguration = deserialisedConfig;
-                return _loadedConfiguration;
+                _configuration = deserialisedConfig;
+                _installationLoaded = true;
+                return _configuration;
             }
             catch (Exception ex)
             {
@@ -375,6 +353,7 @@ namespace Roof.Engine.Managers
                 var defaultConfig = new RoofConfiguration()
                 {
                     ///////////ENCRYPTED///////////
+                    ManageHost = false,
                     SchemaVersion = CURRENT_CONFIG_FILE_SCHEMA_VERSION,
                     RoofIdentifier = Guid.NewGuid().ToString().Replace("-", ""),
                     HasCompletedInitialSetup = false,

@@ -13,7 +13,7 @@ namespace Roof.Engine
 {
     internal class Program
     {
-        static async Task Main(string[] args)
+        static async Task Main()
         {
             using var signals = ShutdownManager.RegisterSignals();
             try
@@ -24,10 +24,6 @@ namespace Roof.Engine
                 Logger.LogToFile($"VERSION - {Version.Get()} ({Version.GetCompileFlag()})", LogSeverity.Warning);
 #endif
                 Logger.LogToFile("[Program]: Engine starting...");
-                await PerformSystemChecks();
-
-                ShutdownManager.Token.ThrowIfCancellationRequested();
-
                 var initStartServicesResult = await InitializeAndStartServices();
                 if (initStartServicesResult)
                 {
@@ -37,6 +33,7 @@ namespace Roof.Engine
                 }
                 else
                 {
+                    Environment.ExitCode = 1;
                     Logger.LogToFile("[Program]: Engine startup failed.", LogSeverity.Danger);
                 }
             }
@@ -65,10 +62,15 @@ namespace Roof.Engine
                 return false;
             }
           
+            Logger.LogToFile($"[Program]: ManageHost={ConfigurationManager.GetConfiguration().ManageHost}");
+            
+            await PerformSystemChecks();
+            ShutdownManager.Token.ThrowIfCancellationRequested();
+
 //#if RELEASE ||  BETA || IA || DEBUG
 #if RELEASE ||  BETA || IA
             var conf = ConfigurationManager.GetConfiguration();
-            if (!IsInternetAvailable())
+            if (ConfigurationManager.GetConfiguration().ManageHost && !IsInternetAvailable())
             {
                 if(!conf.HasCompletedInitialSetup)
                     Logger.LogToFile("Initial setup mode detected. Creating local setup AP network...");
@@ -101,24 +103,21 @@ namespace Roof.Engine
             }
 #endif
             
-            // Shared storage and SFTP dependencies are required even on a fresh install.
-            // Finish provisioning before any client requests can be accepted.
-            Logger.LogToFile("Initializing shared storage and SFTP prerequisites...");
-            try
+            if (ConfigurationManager.GetConfiguration().ManageHost)
             {
-                // TEMPORARY: Remove this call after all existing playground migrations are completed.
+                // Existing appliance installations may have per-user playgrounds.
                 if (ConfigurationManager.GetConfiguration().RegisteredClients.Values.Any(c => !string.IsNullOrEmpty(c.OSSystemUsername)))
                     ClientFileSystemManager.MigrateLegacyPlaygrounds();
 
                 await ClientFileSystemManager.EnsureSharedPlayground();
                 string restartResult = await Shell.ExecuteAsync("sudo systemctl restart ssh");
                 if (!string.IsNullOrEmpty(restartResult))
-                    throw new IOException(restartResult);
+                    throw new IOException("Failed to restart SSH: " + restartResult);
             }
-            catch (Exception ex)
+            else
             {
-                Logger.LogExceptionToFile("[Program]: Failed to initialize shared playground.", ex);
-                return false;
+                Directory.CreateDirectory(ClientFileSystemManager.PlaygroundPath,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             }
 
             ShutdownManager.Token.ThrowIfCancellationRequested();
@@ -146,11 +145,10 @@ namespace Roof.Engine
             await DeviceManager.PerformDeviceCheck();
             ShutdownManager.Token.ThrowIfCancellationRequested();
 
+#if RELEASE || BETA || IA
             Logger.LogToFile("Checking for internet connection...");
             if (IsInternetAvailable())
             {
-#if RELEASE || BETA || IA
-//#if DEBUG
                 Logger.LogToFile("Internet connection is available. Checking for updates...");
 
                 bool updateCheckStatus = await UpdateManager.CheckForUpdate();
@@ -158,12 +156,14 @@ namespace Roof.Engine
                 {
                     Logger.LogToFile("Failed to perform update check. CAUTION: Engine may be running on an outdated version.", LogSeverity.Warning);
                 }
-#endif
             }
             else
             {
                 Logger.LogToFile("Internet connection is not available. Skipping update check. Checking for local clients...");
             }
+#endif
+            if (!ConfigurationManager.GetConfiguration().ManageHost)
+                return;
 
             ShutdownManager.Token.ThrowIfCancellationRequested();
             Logger.LogToFile("Checking for local SFTP server availability...");
