@@ -158,30 +158,6 @@ namespace Roof.Engine.Managers
             await File.WriteAllLinesAsync(sshdConfigFile, lines);
         }
 
-        // TEMPORARY MIGRATION: Remove this method, its helper, and the startup call after
-        // all existing per-user playground migrations are completed. Keep ACL installation
-        // in EnsureSharedPlayground; new installations still require setfacl.
-        public static void MigrateLegacyPlaygrounds()
-        {
-            var targetPath = SafePath.CanonicalizeUnder(PlaygroundPath, "/srv/roof");
-            Directory.CreateDirectory(targetPath);
-            var usernames = ConfigurationManager.GetConfiguration().RegisteredClients.Values
-                .Select(client => client.OSSystemUsername).Where(username => !string.IsNullOrEmpty(username)).Distinct();
-            foreach (var username in usernames)
-            {
-                if (!SecurityManager.IsValidUsername(username))
-                    throw new IOException("Invalid username in playground migration.");
-
-                var sourcePath = SafePath.CanonicalizeUnder($"/home/{username}/playground", $"/home/{username}");
-                if (!Directory.Exists(sourcePath))
-                    continue;
-
-                Logger.LogToFile($"[RoofClientFileSystemManager]: Migrating {sourcePath} to {targetPath}...");
-                MigratePlaygroundDirectory(sourcePath, targetPath, sourcePath, targetPath, username);
-                Logger.LogToFile($"[RoofClientFileSystemManager]: Playground migration completed for {username}.");
-            }
-        }
-
         private static void MigratePlaygroundDirectory(string sourcePath, string targetPath, string sourceRoot, string targetRoot, string username)
         {
             Directory.CreateDirectory(SafePath.CanonicalizeUnder(targetPath, targetRoot));

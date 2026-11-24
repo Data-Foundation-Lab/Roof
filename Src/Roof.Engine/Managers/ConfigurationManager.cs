@@ -6,6 +6,8 @@ using Roof.Common.Tools;
 
 //typedef std::string RoofClientID
 using RoofClientID = string;
+using System.Security.AccessControl;
+using System.Security.Principal;
 
 namespace Roof.Engine.Managers
 {
@@ -76,7 +78,12 @@ namespace Roof.Engine.Managers
 
             var safeKeyDir = KeyDirectory;
             var safeKeyFile = SafePath.CanonicalizeUnder(path, safeKeyDir);
-            Directory.CreateDirectory(safeKeyDir, PRIVATE_DIRECTORY_FILE_MODE);
+
+            if (OperatingSystem.IsWindows())
+                Directory.CreateDirectory(safeKeyDir);
+            else
+                Directory.CreateDirectory(safeKeyDir, PRIVATE_DIRECTORY_FILE_MODE);
+
             if (_configuration.ManageHost)
             {
                 string result = await Shell.ExecuteAsync(
@@ -85,7 +92,22 @@ namespace Roof.Engine.Managers
                     throw new IOException("Failed to secure encryption key directory: " + result);
             }
             else
-                File.SetUnixFileMode(safeKeyDir, PRIVATE_DIRECTORY_FILE_MODE);
+            {
+                if (OperatingSystem.IsWindows())
+                {
+                    var fInfo = new FileInfo(safeKeyDir);
+                    var fSec = fInfo.GetAccessControl();
+                    var fRule = new FileSystemAccessRule(
+                        new NTAccount("BUILTIN\\Users"),
+                        FileSystemRights.ReadAndExecute,
+                        AccessControlType.Allow);
+
+                    fSec.AddAccessRule(fRule);
+                    fInfo.SetAccessControl(fSec);
+                }
+                else
+                    File.SetUnixFileMode(safeKeyDir, PRIVATE_DIRECTORY_FILE_MODE);
+            }
 
             // Write privately, then replace atomically so failed rotation leaves the old key intact.
             string temporaryPath = safeKeyFile + "." + Guid.NewGuid().ToString("N") + ".tmp";
@@ -96,7 +118,7 @@ namespace Roof.Engine.Managers
                     Mode = FileMode.CreateNew,
                     Access = FileAccess.Write,
                     Share = FileShare.None,
-                    UnixCreateMode = PRIVATE_FILE_FILE_MODE
+                    //UnixCreateMode = PRIVATE_FILE_FILE_MODE
                 }))
                 {
                     await stream.WriteAsync(keyBytes.Concat(ivBytes).ToArray());

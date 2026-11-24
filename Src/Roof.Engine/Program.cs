@@ -61,15 +61,14 @@ namespace Roof.Engine
                 Logger.LogToFile("Failed to initialize Configuration Manager.", LogSeverity.Danger);
                 return false;
             }
-          
-            Logger.LogToFile($"[Program]: ManageHost={ConfigurationManager.GetConfiguration().ManageHost}");
-            
+
+            var conf = ConfigurationManager.GetConfiguration();
+
+            Logger.LogToFile($"[Program]: Running in {(conf.ManageHost ? "managed" : "unmanaged")} host mode.");
+
             await PerformSystemChecks();
             ShutdownManager.Token.ThrowIfCancellationRequested();
 
-//#if RELEASE ||  BETA || IA || DEBUG
-#if RELEASE ||  BETA || IA
-            var conf = ConfigurationManager.GetConfiguration();
             if (ConfigurationManager.GetConfiguration().ManageHost && !IsInternetAvailable())
             {
                 if(!conf.HasCompletedInitialSetup)
@@ -101,22 +100,21 @@ namespace Roof.Engine
                     }
                 }
             }
-#endif
             
-            if (ConfigurationManager.GetConfiguration().ManageHost)
+            if (conf.ManageHost)
             {
-                // Existing appliance installations may have per-user playgrounds.
-                if (ConfigurationManager.GetConfiguration().RegisteredClients.Values.Any(c => !string.IsNullOrEmpty(c.OSSystemUsername)))
-                    ClientFileSystemManager.MigrateLegacyPlaygrounds();
-
                 await ClientFileSystemManager.EnsureSharedPlayground();
-                string restartResult = await Shell.ExecuteAsync("sudo systemctl restart ssh");
-                if (!string.IsNullOrEmpty(restartResult))
-                    throw new IOException("Failed to restart SSH: " + restartResult);
+
+                string restartSSHResult = await Shell.ExecuteAsync("sudo systemctl restart ssh");
+                if (!string.IsNullOrEmpty(restartSSHResult))
+                    throw new IOException("Failed to restart SSH: " + restartSSHResult);
             }
             else
             {
-                Directory.CreateDirectory(ClientFileSystemManager.PlaygroundPath,
+                if(OperatingSystem.IsWindows())
+                    Directory.CreateDirectory(ClientFileSystemManager.PlaygroundPath);
+                else
+                    Directory.CreateDirectory(ClientFileSystemManager.PlaygroundPath,
                     UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             }
 
